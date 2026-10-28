@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Build output
+build/
+dist/
+release/
+
+# Bundled executables and media (downloaded/built separately)
+test/ffmpeg/
+test/*.exe
+vendor/*.exe
+
+# Local test media
+*.pam
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.m2v
+*.264
+*.ac3
+*.at3
+*.wav
+*.lpcm
+*.part.*
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

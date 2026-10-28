@@ -1,0 +1,26 @@
+PAMF Replacer
+=============
+
+Copyright (c) 2026. PAMF Replacer is provided as-is, without warranty.
+
+This package bundles third-party components:
+
+1. PAMFtool (https://github.com/ravenDS/PAMFtool)
+   License: GNU General Public License v3.0 (see licenses/GPL-3.0.txt)
+   The bundled executable is a self-contained .NET 8 build of the upstream
+   project. Corresponding source code is available at the URL above.
+
+2. FFmpeg / ffprobe (https://ffmpeg.org/, Windows build by gyan.dev)
+   License: GNU General Public License v3.0 (see licenses/GPL-3.0.txt and
+   licenses/FFmpeg-LICENSE.txt). Source code: https://ffmpeg.org/download.html
+
+3. Qt for Python (PySide6) and Qt libraries (https://www.qt.io/qt-for-python)
+   License: GNU Lesser General Public License v3.0 (see
+   licenses/LGPL-3.0.txt). Qt source code: https://download.qt.io/
+
+4. Python (https://www.python.org/)
+   License: Python Software Foundation License. See
+   https://docs.python.org/3/license.html
+
+The application itself only orchestrates these tools and does not claim
+ownership of the bundled components.
