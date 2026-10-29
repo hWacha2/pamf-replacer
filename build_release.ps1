@@ -106,9 +106,9 @@ Write-Host ("Release: {0} ({1:N1} MB)" -f $release, ($size / 1MB))
 
 if ($Zip) {
     $zipName = "release\PAMF-Replacer-{0}-win64.zip" -f $version
-    $zip = Join-Path $root $zipName
-    if (Test-Path $zip) { Remove-Item -Force $zip }
-    Write-Host "ZIP: $zip"
-    Compress-Archive -Path (Join-Path $release "*") -DestinationPath $zip -CompressionLevel Optimal
-    Write-Host ("ZIP size: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
+    $zipPath = Join-Path $root $zipName
+    if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+    Write-Host "ZIP: $zipPath"
+    Compress-Archive -Path (Join-Path $release "*") -DestinationPath $zipPath -CompressionLevel Optimal
+    Write-Host ("ZIP size: {0:N1} MB" -f ((Get-Item $zipPath).Length / 1MB))
 }
