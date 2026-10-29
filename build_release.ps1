@@ -105,7 +105,8 @@ $size = (Get-ChildItem $release -Recurse -File | Measure-Object Length -Sum).Sum
 Write-Host ("Release: {0} ({1:N1} MB)" -f $release, ($size / 1MB))
 
 if ($Zip) {
-    $zip = Join-Path $root ("release\PAMF-Replacer-{0}-win64.zip" -f $version)
+    $zipName = "release\PAMF-Replacer-{0}-win64.zip" -f $version
+    $zip = Join-Path $root $zipName
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Write-Host "ZIP: $zip"
     Compress-Archive -Path (Join-Path $release "*") -DestinationPath $zip -CompressionLevel Optimal
