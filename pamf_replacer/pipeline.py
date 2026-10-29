@@ -487,7 +487,8 @@ def build_audio_command(
         container = "ac3"
     else:
         codec = "pcm_s24le" if settings.bits >= 24 else "pcm_s16le"
-        sample_rate = settings.sample_rate
+        # PAMF LPCM is always 48 kHz; other rates would be mislabelled on playback.
+        sample_rate = 48000
         channels = settings.channels
         codec_args = []
         container = "wav"
@@ -549,7 +550,14 @@ def run_pipeline(
     original_audio = context.pam.audio
 
     if edit_mode:
-        audio_mode = "original" if settings.audio_enabled and original_audio else "none"
+        if settings.audio_enabled and original_audio:
+            audio_mode = settings.audio_mode if settings.audio_mode in ("original", "lpcm", "ac3") else "original"
+        else:
+            audio_mode = "none"
+        if audio_mode == "original" and original_audio.kind not in _ORIGINAL_AUDIO_EXTENSIONS:
+            raise PipelineError(
+                f"Неподдерживаемый кодек оригинального аудио: {original_audio.codec_label}"
+            )
     else:
         if source_info is None:
             raise PipelineError("Не выбрано новое видео для замены.")
@@ -577,8 +585,15 @@ def run_pipeline(
     part = output.with_name(output.stem + ".part" + (output.suffix or ".pam"))
 
     if edit_mode:
-        video_span = (8.0, 85.0) if audio_enabled else (8.0, 90.0)
-        audio_span = None
+        if audio_mode in ("lpcm", "ac3"):
+            video_span = (8.0, 72.0)
+            audio_span = (72.0, 90.0)
+        elif audio_enabled:
+            video_span = (8.0, 85.0)
+            audio_span = None
+        else:
+            video_span = (8.0, 90.0)
+            audio_span = None
         mux_start = 92.0
     elif audio_mode == "original":
         video_span = (0.0, 85.0)
@@ -669,17 +684,31 @@ def run_pipeline(
         elif audio_enabled and audio_span and audio_file:
             if cancel and cancel.is_set():
                 raise Cancelled()
+            if edit_mode:
+                if demux_dir is None:
+                    callbacks.stage("Извлечение аудио из PAM…")
+                    callbacks.progress(70)
+                    demux_dir = Path(tempfile.mkdtemp(prefix="demux-", dir=str(workdir)))
+                    run_pamf_demux(tools.pamf, context.pam.path, demux_dir, callbacks, cancel, on_process)
+                audio_input = find_demux_audio(demux_dir, original_audio)
+                audio_duration = context.pam.duration
+                callbacks.log(
+                    f"Аудио из PAM ({original_audio.codec_label}) перекодируется: {audio_input.name}"
+                )
+            else:
+                audio_input = source_info.path
+                audio_duration = source_info.duration
             callbacks.stage("Кодирование аудио…")
             audio_command = build_audio_command(
                 tools.ffmpeg,
-                source_info.path,
+                audio_input,
                 audio_file,
                 context.settings,
             )
             callbacks.log("> " + subprocess.list2cmdline(audio_command))
             run_ffmpeg(
                 audio_command,
-                source_info.duration,
+                audio_duration,
                 callbacks,
                 cancel,
                 audio_span[0],

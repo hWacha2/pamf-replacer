@@ -776,7 +776,7 @@ class MainWindow(QMainWindow):
         if self.job_mode == "edit":
             self.mode_hint.setText(
                 "Второй файл не нужен: видео из PAM будет перекодировано с текущими "
-                "настройками, оригинальный звук сохранится без перекодирования."
+                "настройками. Звук можно сохранить без изменений или перекодировать в AC3/LPCM."
             )
         else:
             self.mode_hint.setText(
@@ -936,9 +936,10 @@ class MainWindow(QMainWindow):
         audio_row.setSpacing(8)
 
         self.rate_combo = QComboBox()
-        for rate in (48000, 44100, 32000):
+        for rate in (48000,):
             self.rate_combo.addItem(f"{rate} Гц", rate)
         self.rate_combo.setMinimumWidth(108)
+        self.rate_combo.setToolTip("PAMF поддерживает LPCM только с частотой 48 кГц.")
 
         self.channels_spin = QSpinBox()
         self.channels_spin.setRange(1, 8)
@@ -1416,12 +1417,16 @@ class MainWindow(QMainWindow):
             self.rate_combo.setCurrentIndex(max(0, index))
             self.channels_spin.setValue(2)
             self.bits_combo.setCurrentIndex(0)
-        preferred = "original" if stream and stream.kind in ("atrac3plus", "ac3") else "lpcm"
+        if self.job_mode == "edit":
+            preferred = "original"
+        else:
+            preferred = "original" if stream and stream.kind in ("atrac3plus", "ac3") else "lpcm"
         self._refresh_audio_modes(preferred)
 
     def _refresh_audio_modes(self, preferred: str | None = None) -> None:
         audio = self.pam_info.audio if self.pam_info else None
         if self.job_mode == "edit":
+            current = preferred or "original"
             self.audio_mode_combo.blockSignals(True)
             self.audio_mode_combo.clear()
             if audio:
@@ -1431,9 +1436,22 @@ class MainWindow(QMainWindow):
                     "Дорожка берётся из оригинального PAM без перекодирования.",
                     Qt.ToolTipRole,
                 )
+                self.audio_mode_combo.addItem("AC3 — из PAM", "ac3")
+                self.audio_mode_combo.setItemData(
+                    1,
+                    "Перекодировать звук из PAM в AC3. Меньше битрейт — меньше размер.",
+                    Qt.ToolTipRole,
+                )
+                self.audio_mode_combo.addItem("LPCM — из PAM", "lpcm")
+                self.audio_mode_combo.setItemData(
+                    2,
+                    "Перекодировать звук из PAM в LPCM с выбранными каналами и разрядностью.",
+                    Qt.ToolTipRole,
+                )
             else:
                 self.audio_mode_combo.addItem("В PAM нет аудио", "none")
-            self.audio_mode_combo.setCurrentIndex(0)
+            index = self.audio_mode_combo.findData(current)
+            self.audio_mode_combo.setCurrentIndex(max(0, index))
             self.audio_mode_combo.blockSignals(False)
             self._update_audio_controls()
             return
@@ -1482,9 +1500,8 @@ class MainWindow(QMainWindow):
     def _update_audio_controls(self) -> None:
         mode = self.audio_mode_combo.currentData()
         active = self.audio_check.isChecked()
-        edit_mode = self.job_mode == "edit"
-        is_lpcm = mode == "lpcm" and not edit_mode
-        is_ac3 = mode == "ac3" and not edit_mode
+        is_lpcm = mode == "lpcm"
+        is_ac3 = mode == "ac3"
 
         self.audio_mode_combo.setEnabled(active and self.audio_mode_combo.count() > 0)
         for field in (self.rate_field, self.channels_field, self.bits_field):
@@ -1501,7 +1518,7 @@ class MainWindow(QMainWindow):
         else:
             self.channels_spin.setMaximum(8)
 
-        self.rate_combo.setEnabled(active and is_lpcm)
+        self.rate_combo.setEnabled(False)
         self.channels_spin.setEnabled(active and (is_lpcm or is_ac3))
         self.bits_combo.setEnabled(active and is_lpcm)
         self.ac3_bitrate_combo.setEnabled(active and is_ac3)
@@ -1714,7 +1731,9 @@ class MainWindow(QMainWindow):
         if edit_mode:
             if audio_enabled and not self.pam_info.audio:
                 audio_enabled = False
-            audio_mode = "original" if audio_enabled else "none"
+            audio_mode = str(self.audio_mode_combo.currentData() or "original") if audio_enabled else "none"
+            if audio_mode not in ("original", "lpcm", "ac3"):
+                audio_mode = "original"
         else:
             audio_mode = str(self.audio_mode_combo.currentData() or "lpcm") if audio_enabled else "none"
             if audio_enabled:
@@ -1797,12 +1816,13 @@ class MainWindow(QMainWindow):
                 )
             elif audio_mode == "ac3":
                 self._append_log(
-                    f"Аудио:  AC3 {settings.ac3_bitrate} кбит/с, 48 кГц, "
-                    f"{min(6, settings.channels)} ch"
+                    f"Аудио:  AC3 {'из PAM' if edit_mode else 'из нового видео'}, "
+                    f"{settings.ac3_bitrate} кбит/с, 48 кГц, {min(6, settings.channels)} ch"
                 )
             else:
                 self._append_log(
-                    f"Аудио:  LPCM {settings.sample_rate} Гц, {settings.channels} ch, {settings.bits} бит"
+                    f"Аудио:  LPCM {'из PAM' if edit_mode else 'из нового видео'}, "
+                    f"48000 Гц, {settings.channels} ch, {settings.bits} бит"
                 )
         else:
             self._append_log("Аудио: без звука")

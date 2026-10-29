@@ -1,3 +1,3 @@
 """PAMF Replacer - replace a video stream inside a PlayStation PAMF file."""
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
