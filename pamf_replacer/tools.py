@@ -247,18 +247,34 @@ class PamInfo:
             return f"{video.fps_float:g}"
         return "—"
 
+    def estimated_audio_bitrate(self) -> float | None:
+        """Approximate the original audio bitrate in bits per second."""
+        audio = self.audio
+        if not audio:
+            return None
+        if audio.kind == "lpcm" and audio.sample_rate and audio.channels and audio.bits:
+            # PAMF stores mono LPCM padded to two channels, so the file size
+            # matches a stereo track even when only one channel is reported.
+            channels = max(2, audio.channels)
+            return float(audio.sample_rate * channels * audio.bits)
+        if audio.kind == "atrac3plus":
+            return 256_000.0
+        if audio.kind == "ac3":
+            return 448_000.0
+        return None
+
+    def estimated_audio_bytes(self) -> float | None:
+        """Approximate the size of the original audio stream in bytes."""
+        bitrate = self.estimated_audio_bitrate()
+        if bitrate is None or self.duration <= 0:
+            return None
+        return bitrate * self.duration / 8
+
     def estimated_video_bitrate(self) -> float | None:
         """Approximate the original video bitrate in Mbps."""
         if self.duration <= 0 or self.size <= 0:
             return None
-        audio_bps = 0.0
-        for stream in self.streams:
-            if stream.kind == "lpcm" and stream.sample_rate and stream.channels and stream.bits:
-                audio_bps += stream.sample_rate * stream.channels * stream.bits
-            elif stream.kind == "atrac3plus":
-                audio_bps += 256_000
-            elif stream.kind == "ac3":
-                audio_bps += 448_000
+        audio_bps = self.estimated_audio_bitrate() or 0.0
         total_bps = self.size * 8 / self.duration
         return max(0.5, (total_bps - audio_bps) / 1_000_000)
 

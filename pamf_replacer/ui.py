@@ -60,6 +60,21 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else Path(__file__).resolve().parent.parent
 )
+
+
+def format_size(value: float | None) -> str:
+    """Format a byte count for compact display."""
+    if value is None or value < 0:
+        return "—"
+    if value >= 1024**3:
+        return f"{value / 1024**3:.2f} ГБ".replace(".", ",")
+    if value >= 1024**2:
+        return f"{value / 1024**2:.1f} МБ".replace(".", ",")
+    if value >= 1024:
+        return f"{value / 1024:.0f} КБ"
+    return f"{int(round(value))} Б"
+
+
 VIDEO_SUFFIXES = {
     ".mp4",
     ".mkv",
@@ -93,6 +108,11 @@ QLabel#subtitle { color: #7f8ba1; font-size: 9.5pt; }
 QLabel#muted { color: #7f8ba1; }
 QLabel#fieldLabel { color: #7f8ba1; font-size: 8.5pt; }
 QLabel#value { color: #f1f5fc; font-weight: 600; }
+QLabel#sizeValue { color: #dfe7f6; }
+QLabel#sizeTotal { color: #f1f5fc; font-weight: 700; }
+QLabel#sizeHint { color: #7f8ba1; font-size: 8.5pt; }
+QLabel#sizeLine { color: #c8d2e3; font-size: 9pt; }
+QFrame#sizeSummary { background-color: #12161d; border: 1px solid #232a36; border-radius: 9px; }
 QLabel#zoneTitle { font-size: 12pt; font-weight: 600; color: #f1f5fc; }
 QLabel#zoneFile { font-size: 11pt; font-weight: 600; color: #f1f5fc; }
 QLabel#zoneDetails { color: #8d99ae; font-size: 9pt; }
@@ -975,6 +995,84 @@ class MainWindow(QMainWindow):
         output_layout.setContentsMargins(12, 8, 12, 8)
         output_layout.setSpacing(6)
 
+        self.size_summary = QFrame()
+        self.size_summary.setObjectName("sizeSummary")
+        summary_layout = QVBoxLayout(self.size_summary)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setSpacing(4)
+
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(12)
+        summary_grid.setVerticalSpacing(3)
+        for column, text, align in (
+            (1, "Сейчас", Qt.AlignRight),
+            (2, "Получится", Qt.AlignRight),
+        ):
+            label = QLabel(text)
+            label.setObjectName("fieldLabel")
+            label.setAlignment(align | Qt.AlignVCenter)
+            summary_grid.addWidget(label, 0, column)
+        summary_grid.setColumnStretch(0, 1)
+
+        self.size_current_video = QLabel("—")
+        self.size_projected_video = QLabel("—")
+        self.size_current_audio = QLabel("—")
+        self.size_projected_audio = QLabel("—")
+        self.size_current_total = QLabel("—")
+        self.size_projected_total = QLabel("—")
+        self.size_delta = QLabel("")
+        for widget in (
+            self.size_current_video,
+            self.size_projected_video,
+            self.size_current_audio,
+            self.size_projected_audio,
+        ):
+            widget.setObjectName("sizeValue")
+            widget.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        for widget in (self.size_current_total, self.size_projected_total):
+            widget.setObjectName("sizeTotal")
+            widget.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.size_delta.setObjectName("muted")
+        self.size_delta.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        for row, (title, current, projected) in enumerate(
+            (
+                ("Видео", self.size_current_video, self.size_projected_video),
+                ("Аудио", self.size_current_audio, self.size_projected_audio),
+                ("Итого", self.size_current_total, self.size_projected_total),
+            ),
+            start=1,
+        ):
+            row_label = QLabel(title)
+            row_label.setObjectName("muted" if row < 3 else "value")
+            summary_grid.addWidget(row_label, row, 0)
+            summary_grid.addWidget(current, row, 1)
+            summary_grid.addWidget(projected, row, 2)
+        summary_grid.addWidget(self.size_delta, 3, 3)
+        summary_layout.addLayout(summary_grid)
+
+        self.size_hint = QLabel(
+            "Оценка по среднему битрейту — итоговый файл может немного отличаться."
+        )
+        self.size_hint.setObjectName("sizeHint")
+        self.size_hint.setWordWrap(True)
+        summary_layout.addWidget(self.size_hint)
+        self.size_summary.setToolTip(
+            "Приблизительный размер потоков и итогового PAM.\n"
+            "Видео считается по выбранному среднему битрейту и длительности,\n"
+            "аудио — по выбранному режиму и параметрам."
+        )
+        output_layout.addWidget(self.size_summary)
+        for signal in (
+            self.bitrate_spin.valueChanged,
+            self.audio_check.toggled,
+            self.audio_mode_combo.currentIndexChanged,
+            self.channels_spin.valueChanged,
+            self.bits_combo.currentIndexChanged,
+            self.ac3_bitrate_combo.currentIndexChanged,
+        ):
+            signal.connect(lambda *_: self._update_size_summary())
+
         output_row_widget = QWidget()
         output_row = QHBoxLayout(output_row_widget)
         output_row.setContentsMargins(0, 0, 0, 0)
@@ -1063,6 +1161,18 @@ class MainWindow(QMainWindow):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(8)
         layout.addWidget(self.progress_bar)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(10)
+        self.footer_size = QLabel("")
+        self.footer_size.setObjectName("sizeLine")
+        self.footer_size.setVisible(False)
+        self.footer_size_delta = QLabel("")
+        self.footer_size_delta.setObjectName("muted")
+        self.footer_size_delta.setVisible(False)
+        size_row.addWidget(self.footer_size, 1)
+        size_row.addWidget(self.footer_size_delta, 0, Qt.AlignRight)
+        layout.addLayout(size_row)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
@@ -1523,6 +1633,122 @@ class MainWindow(QMainWindow):
         self.bits_combo.setEnabled(active and is_lpcm)
         self.ac3_bitrate_combo.setEnabled(active and is_ac3)
 
+    def _projected_duration(self) -> float | None:
+        if not self.pam_info:
+            return None
+        if self.job_mode == "edit":
+            return self.pam_info.duration or None
+        if self.source_info and self.source_info.duration:
+            return self.source_info.duration
+        return None
+
+    def _projected_audio_bytes(self, duration: float) -> float:
+        if not self.audio_check.isChecked():
+            return 0.0
+        mode = self.audio_mode_combo.currentData()
+        if mode == "original":
+            bitrate = self.pam_info.estimated_audio_bitrate() if self.pam_info else None
+            return (bitrate or 0.0) * duration / 8
+        if mode == "ac3":
+            bitrate = int(self.ac3_bitrate_combo.currentData() or 448)
+            return bitrate * 1000 * duration / 8
+        if mode == "lpcm":
+            # Mono is padded to two channels on the wire by PAMF.
+            channels = max(2, self.channels_spin.value())
+            bits = int(self.bits_combo.currentData() or 16)
+            return 48000 * channels * bits * duration / 8
+        return 0.0
+
+    def _update_size_summary(self) -> None:
+        if not hasattr(self, "size_summary"):
+            return
+        pam = self.pam_info
+        self.size_summary.setVisible(bool(pam))
+        if hasattr(self, "footer_size"):
+            self.footer_size.setVisible(bool(pam))
+            self.footer_size_delta.setVisible(bool(pam))
+        if not pam:
+            return
+
+        current_audio = pam.estimated_audio_bytes() if pam.audio else None
+        if pam.audio and current_audio is None:
+            current_video = None
+        else:
+            current_video = max(0.0, pam.size - (current_audio or 0.0))
+        self.size_current_video.setText(format_size(current_video))
+        self.size_current_audio.setText(
+            format_size(current_audio) if pam.audio else "нет"
+        )
+        self.size_current_total.setText(format_size(pam.size))
+
+        duration = self._projected_duration()
+        if duration is None:
+            for label in (
+                self.size_projected_video,
+                self.size_projected_audio,
+                self.size_projected_total,
+            ):
+                label.setText("—")
+            self.size_delta.setText("")
+        else:
+            video = max(0.0, self.bitrate_spin.value()) * 1_000_000 * duration / 8
+            if self.audio_check.isChecked():
+                audio = self._projected_audio_bytes(duration)
+                audio_text = format_size(audio)
+            else:
+                audio = 0.0
+                audio_text = "нет"
+            total = video + audio
+            self.size_projected_video.setText(format_size(video))
+            self.size_projected_audio.setText(audio_text)
+            self.size_projected_total.setText(format_size(total))
+
+            difference = total - pam.size
+            percent = difference / pam.size * 100 if pam.size else 0.0
+            if abs(percent) < 0.5:
+                self.size_delta.setText("≈ без изменений")
+                self.size_delta.setStyleSheet("color:#7f8ba1;")
+            elif difference < 0:
+                self.size_delta.setText(
+                    f"−{format_size(abs(difference))} (−{abs(percent):.0f} %)"
+                )
+                self.size_delta.setStyleSheet("color:#7fd18b;")
+            else:
+                self.size_delta.setText(
+                    f"+{format_size(difference)} (+{percent:.0f} %)"
+                )
+                self.size_delta.setStyleSheet("color:#f0b45a;")
+
+        mode = self.audio_mode_combo.currentData()
+        if not self.audio_check.isChecked():
+            hint = "Аудиодорожка не будет добавлена в результат."
+        elif mode == "lpcm" and self.channels_spin.value() == 1:
+            hint = "Моно LPCM в PAMF дополняется до двух каналов — размер как у стерео."
+        elif mode == "original":
+            hint = "Аудио берётся из PAM без перекодирования."
+        elif mode == "ac3":
+            hint = "AC3 — сжатие с потерями; размер считается по выбранному битрейту."
+        else:
+            hint = "Оценка по среднему битрейту — итоговый файл может немного отличаться."
+        self.size_hint.setText(hint)
+        if hasattr(self, "footer_size"):
+            if duration is None:
+                self.footer_size.setText(
+                    f"Размер: видео {self.size_current_video.text()} · "
+                    f"аудио {self.size_current_audio.text()} · "
+                    f"итого {self.size_current_total.text()}"
+                )
+                self.footer_size_delta.setText("")
+                self.footer_size_delta.setStyleSheet("")
+            else:
+                self.footer_size.setText(
+                    f"Размер: видео {self.size_current_video.text()} → {self.size_projected_video.text()} · "
+                    f"аудио {self.size_current_audio.text()} → {self.size_projected_audio.text()} · "
+                    f"итого {self.size_current_total.text()} → {self.size_projected_total.text()}"
+                )
+                self.footer_size_delta.setText(self.size_delta.text())
+                self.footer_size_delta.setStyleSheet(self.size_delta.styleSheet())
+
     def _suggest_output(self, pam_path: Path) -> None:
         folder = Path(self.config.output_dir) if self.config.output_dir else pam_path.parent
         if not folder.is_dir():
@@ -1594,6 +1820,7 @@ class MainWindow(QMainWindow):
     def _sync_ui(self) -> None:
         if self._running:
             return
+        self._update_size_summary()
         edit_mode = self.job_mode == "edit"
         ready = bool(self.pam_info and self.tools.ready and (edit_mode or self.source_info))
         self.create_button.setText("Пересобрать PAM" if edit_mode else "Создать PAM")
