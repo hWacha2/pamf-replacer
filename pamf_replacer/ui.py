@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -83,6 +84,9 @@ QWidget { color: #e7ecf5; font-family: "Segoe UI"; font-size: 10pt; }
 QWidget#root { background-color: #0f1116; }
 QWidget#body { background-color: #0f1116; }
 QFrame#panel { background-color: #171a21; border: 1px solid #252b37; border-radius: 14px; }
+QFrame#modeBar { background-color: #141821; border: 1px solid #252b37; border-radius: 12px; }
+QRadioButton { spacing: 8px; color: #c8d2e3; }
+QRadioButton:disabled { color: #5f6a7e; }
 QFrame#footer { background-color: #101319; border-top: 1px solid #252b37; }
 QLabel#appTitle { font-size: 19pt; font-weight: 700; color: #f3f6fc; }
 QLabel#subtitle { color: #7f8ba1; font-size: 9.5pt; }
@@ -341,6 +345,7 @@ class DropZone(QFrame):
         self._set_file_title(message, True)
         self.details_label.setText(str(path) if path else "")
         self.warning_label.hide()
+        self.browse_button.show()
         self.update()
 
     def set_loaded(self, path: Path, details: str, warning: str | None = None) -> None:
@@ -354,6 +359,7 @@ class DropZone(QFrame):
             self.warning_label.show()
         else:
             self.warning_label.hide()
+        self.browse_button.show()
         self.update()
 
     def set_error(self, message: str) -> None:
@@ -362,6 +368,17 @@ class DropZone(QFrame):
         self._set_file_title("Не удалось прочитать файл", True)
         self.details_label.setText(message)
         self.warning_label.hide()
+        self.browse_button.show()
+        self.update()
+
+    def set_inactive(self, title: str, details: str) -> None:
+        self._busy = False
+        self._loaded = False
+        self._set_file_title(title, True)
+        self.file_label.setToolTip("")
+        self.details_label.setText(details)
+        self.warning_label.hide()
+        self.browse_button.hide()
         self.update()
 
     def clear(self) -> None:
@@ -371,6 +388,7 @@ class DropZone(QFrame):
         self.file_label.setToolTip("")
         self.details_label.setText("или нажмите, чтобы выбрать")
         self.warning_label.hide()
+        self.browse_button.show()
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -634,6 +652,8 @@ class MainWindow(QMainWindow):
         self.pam_info: PamInfo | None = None
         self.source_info: MediaInfo | None = None
         self.pam_path: Path | None = None
+        self.job_mode = "replace"  # "replace" or "edit"
+        self._replace_audio_mode: str | None = None
         self._original_bitrate: float | None = None
         self._last_output: Path | None = None
         self._worker: PipelineWorker | None = None
@@ -672,6 +692,7 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(12)
 
         body_layout.addLayout(self._build_header())
+        body_layout.addWidget(self._build_mode_bar())
 
         zones = QHBoxLayout()
         zones.setSpacing(10)
@@ -712,6 +733,55 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(body, 1)
         root_layout.addWidget(self._build_footer())
+
+    def _build_mode_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("modeBar")
+        self.mode_bar = bar
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(14, 9, 14, 9)
+        layout.setSpacing(3)
+
+        top = QHBoxLayout()
+        top.setSpacing(18)
+        caption = QLabel("Что сделать с видео")
+        caption.setObjectName("fieldLabel")
+        self.edit_radio = QRadioButton("Изменить существующее")
+        self.replace_radio = QRadioButton("Заменить на новое")
+        self.replace_radio.setChecked(True)
+        self.edit_radio.toggled.connect(
+            lambda checked: self._set_job_mode("edit") if checked else None
+        )
+        self.replace_radio.toggled.connect(
+            lambda checked: self._set_job_mode("replace") if checked else None
+        )
+        self.edit_radio.setToolTip(
+            "Перекодировать видео, которое уже находится в PAM. Второй файл не нужен."
+        )
+        self.replace_radio.setToolTip("Взять картинку из выбранного видеофайла.")
+        top.addWidget(caption)
+        top.addWidget(self.edit_radio)
+        top.addWidget(self.replace_radio)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        self.mode_hint = QLabel("")
+        self.mode_hint.setObjectName("muted")
+        self.mode_hint.setWordWrap(True)
+        layout.addWidget(self.mode_hint)
+        self._update_mode_hint()
+        return bar
+
+    def _update_mode_hint(self) -> None:
+        if self.job_mode == "edit":
+            self.mode_hint.setText(
+                "Второй файл не нужен: видео из PAM будет перекодировано с текущими "
+                "настройками, оригинальный звук сохранится без перекодирования."
+            )
+        else:
+            self.mode_hint.setText(
+                "Второй файл заменит картинку. Звук можно взять из него или сохранить оригинальный."
+            )
 
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
@@ -1178,25 +1248,24 @@ class MainWindow(QMainWindow):
 
         self._apply_bitrate_defaults(video.height or 720)
         self._apply_audio_defaults(audio)
-        audio_available = bool(audio) or bool(self.source_info and self.source_info.has_audio)
-        self.audio_check.setEnabled(audio_available)
-        if audio_available:
-            self.audio_check.setChecked(True)
-        else:
-            self.audio_check.setChecked(False)
-            self.audio_mode_combo.setEnabled(False)
+        self._update_audio_availability()
+        self._update_audio_controls()
         self._suggest_output(info.path)
 
         if video.kind == "avc":
             self._append_log("Обнаружен AVC/H.264: используется libx264 (режим совместимости).")
         if audio and audio.kind != "lpcm":
-            self._append_log(
-                f"Оригинальное аудио — {audio.codec_label}. "
-                "По умолчанию сохраняется без перекодирования; можно выбрать LPCM/AC3 из нового видео."
-            )
-            if not self.source_info or self.source_info.has_audio:
-                self.audio_check.setChecked(True)
-                self.audio_check.setEnabled(True)
+            if self.job_mode == "edit":
+                self._append_log(
+                    f"Оригинальное аудио — {audio.codec_label}; "
+                    "при пересборке сохраняется без перекодирования."
+                )
+            else:
+                self._append_log(
+                    f"Оригинальное аудио — {audio.codec_label}. "
+                    "По умолчанию сохраняется без перекодирования; можно выбрать LPCM/AC3 из нового видео."
+                )
+            self._update_audio_availability()
 
         self._append_log(
             f"PAM: {info.duration:.2f} c, {info.resolution_label}, "
@@ -1220,6 +1289,8 @@ class MainWindow(QMainWindow):
     def _set_source(self, path: Path) -> None:
         if self._running:
             return
+        if self.job_mode == "edit":
+            self._set_job_mode("replace")
         if not path.is_file():
             QMessageBox.warning(self, "Файл не найден", f"Не удалось найти файл:\n{path}")
             return
@@ -1252,13 +1323,7 @@ class MainWindow(QMainWindow):
 
     def _on_source_loaded(self, info: MediaInfo) -> None:
         self.source_info = info
-        details = f"{info.duration_label} · {info.resolution_label} · {info.video_codec or '?'}"
-        if info.audio_codec:
-            details += f" / {info.audio_codec}"
-            if info.channels:
-                details += f", {info.channels} ch"
-        else:
-            details += " · без аудио"
+        details = self._source_details(info)
         warning = None
         if not info.has_audio:
             if self.pam_info and self.pam_info.audio:
@@ -1356,6 +1421,23 @@ class MainWindow(QMainWindow):
 
     def _refresh_audio_modes(self, preferred: str | None = None) -> None:
         audio = self.pam_info.audio if self.pam_info else None
+        if self.job_mode == "edit":
+            self.audio_mode_combo.blockSignals(True)
+            self.audio_mode_combo.clear()
+            if audio:
+                self.audio_mode_combo.addItem(f"Оригинал — {audio.codec_label}", "original")
+                self.audio_mode_combo.setItemData(
+                    0,
+                    "Дорожка берётся из оригинального PAM без перекодирования.",
+                    Qt.ToolTipRole,
+                )
+            else:
+                self.audio_mode_combo.addItem("В PAM нет аудио", "none")
+            self.audio_mode_combo.setCurrentIndex(0)
+            self.audio_mode_combo.blockSignals(False)
+            self._update_audio_controls()
+            return
+
         current = preferred or self.audio_mode_combo.currentData()
         self.audio_mode_combo.blockSignals(True)
         self.audio_mode_combo.clear()
@@ -1383,12 +1465,26 @@ class MainWindow(QMainWindow):
         self.audio_mode_combo.blockSignals(False)
         self._update_audio_controls()
 
+    def _update_audio_availability(self) -> None:
+        if self.job_mode == "edit":
+            available = bool(self.pam_info and self.pam_info.audio)
+        else:
+            available = bool(
+                (self.pam_info and self.pam_info.audio)
+                or (self.source_info and self.source_info.has_audio)
+            )
+        self.audio_check.setEnabled(available)
+        if not available:
+            self.audio_check.setChecked(False)
+        else:
+            self.audio_check.setChecked(True)
+
     def _update_audio_controls(self) -> None:
         mode = self.audio_mode_combo.currentData()
         active = self.audio_check.isChecked()
-        is_lpcm = mode == "lpcm"
-        is_ac3 = mode == "ac3"
-        is_original = mode == "original"
+        edit_mode = self.job_mode == "edit"
+        is_lpcm = mode == "lpcm" and not edit_mode
+        is_ac3 = mode == "ac3" and not edit_mode
 
         self.audio_mode_combo.setEnabled(active and self.audio_mode_combo.count() > 0)
         for field in (self.rate_field, self.channels_field, self.bits_field):
@@ -1433,10 +1529,57 @@ class MainWindow(QMainWindow):
             self.config.output_dir = str(Path(path).parent)
 
     # ---------------------------------------------------------------- state
+    def _set_job_mode(self, mode: str) -> None:
+        if mode not in ("replace", "edit") or mode == self.job_mode or self._running:
+            return
+        if mode == "edit":
+            self._replace_audio_mode = str(self.audio_mode_combo.currentData() or "lpcm")
+        self.job_mode = mode
+        for radio, value in ((self.edit_radio, "edit"), (self.replace_radio, "replace")):
+            radio.blockSignals(True)
+            radio.setChecked(value == mode)
+            radio.blockSignals(False)
+        self._refresh_video_zone()
+        self._update_audio_availability()
+        self._refresh_audio_modes(self._replace_audio_mode if mode == "replace" else None)
+        self._update_mode_hint()
+        self._append_log(
+            "Режим: изменение видео из PAM (второй файл не нужен)."
+            if mode == "edit"
+            else "Режим: замена видео новым файлом."
+        )
+        self._sync_ui()
+
+    def _refresh_video_zone(self) -> None:
+        if self.job_mode == "edit":
+            self.video_zone.setEnabled(False)
+            self.video_zone.set_inactive(
+                "Видео берётся из PAM",
+                "Второй файл не нужен — текущее видео будет перекодировано.",
+            )
+            return
+        self.video_zone.setEnabled(True)
+        if self.source_info:
+            self.video_zone.set_loaded(self.source_info.path, self._source_details(self.source_info))
+        else:
+            self.video_zone.clear()
+
+    def _source_details(self, info: MediaInfo) -> str:
+        details = f"{info.duration_label} · {info.resolution_label} · {info.video_codec or '?'}"
+        if info.audio_codec:
+            details += f" / {info.audio_codec}"
+            if info.channels:
+                details += f", {info.channels} ch"
+        else:
+            details += " · без аудио"
+        return details
+
     def _sync_ui(self) -> None:
         if self._running:
             return
-        ready = bool(self.pam_info and self.source_info and self.tools.ready)
+        edit_mode = self.job_mode == "edit"
+        ready = bool(self.pam_info and self.tools.ready and (edit_mode or self.source_info))
+        self.create_button.setText("Пересобрать PAM" if edit_mode else "Создать PAM")
         self.create_button.setEnabled(ready)
 
         if not self.tools.ready:
@@ -1444,6 +1587,10 @@ class MainWindow(QMainWindow):
             self.status_label.setStyleSheet("color:#f0b45a;")
         elif not self.pam_info:
             self.status_label.setText("Добавьте оригинальный PAM (шаг 1).")
+            self.status_label.setStyleSheet("")
+        elif edit_mode:
+            output = Path(self.output_edit.text()).name if self.output_edit.text().strip() else "—"
+            self.status_label.setText(f"Готово к пересборке → {output}")
             self.status_label.setStyleSheet("")
         elif not self.source_info:
             self.status_label.setText("Теперь добавьте видео для замены (шаг 2).")
@@ -1458,13 +1605,18 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool) -> None:
         self._running = running
         self.pam_zone.setEnabled(not running)
-        self.video_zone.setEnabled(not running)
+        self.mode_bar.setEnabled(not running)
+        self.video_zone.setEnabled(not running and self.job_mode != "edit")
         self.settings_panel.setEnabled(not running)
         self.tools_button.setEnabled(not running)
         self.cancel_button.setVisible(running)
         self.cancel_button.setEnabled(running)
         self.open_button.setVisible(bool(self._last_output) and not running)
-        self.create_button.setEnabled(not running and bool(self.pam_info and self.source_info and self.tools.ready))
+        edit_mode = self.job_mode == "edit"
+        self.create_button.setEnabled(
+            not running
+            and bool(self.pam_info and self.tools.ready and (edit_mode or self.source_info))
+        )
         if running:
             self.progress_bar.setValue(0)
             self.progress_text.setText("0%")
@@ -1486,7 +1638,10 @@ class MainWindow(QMainWindow):
     def _start_job(self) -> None:
         if self._running:
             return
-        if not self.pam_info or not self.source_info:
+        if not self.pam_info:
+            return
+        edit_mode = self.job_mode == "edit"
+        if not edit_mode and not self.source_info:
             return
         if not self.tools.ready:
             QMessageBox.warning(
@@ -1524,7 +1679,7 @@ class MainWindow(QMainWindow):
                 "Выходной файл совпадает с оригинальным PAM.\nВыберите другое имя или папку.",
             )
             return
-        if self.source_info.path.exists() and output.resolve() == self.source_info.path.resolve():
+        if self.source_info and self.source_info.path.exists() and output.resolve() == self.source_info.path.resolve():
             QMessageBox.critical(
                 self,
                 "Нельзя перезаписать видео",
@@ -1556,41 +1711,46 @@ class MainWindow(QMainWindow):
             return
 
         audio_enabled = self.audio_check.isChecked()
-        audio_mode = str(self.audio_mode_combo.currentData() or "lpcm") if audio_enabled else "none"
-        if audio_enabled:
-            if audio_mode == "original":
-                if not self.pam_info.audio:
+        if edit_mode:
+            if audio_enabled and not self.pam_info.audio:
+                audio_enabled = False
+            audio_mode = "original" if audio_enabled else "none"
+        else:
+            audio_mode = str(self.audio_mode_combo.currentData() or "lpcm") if audio_enabled else "none"
+            if audio_enabled:
+                if audio_mode == "original":
+                    if not self.pam_info.audio:
+                        QMessageBox.warning(
+                            self,
+                            "Нет оригинального аудио",
+                            "В исходном PAM нет аудиодорожки — сохранять нечего.",
+                        )
+                        return
+                    if (
+                        self.pam_info.duration
+                        and self.source_info.duration
+                        and abs(self.pam_info.duration - self.source_info.duration) > 1.0
+                    ):
+                        answer = QMessageBox.question(
+                            self,
+                            "Длительность аудио",
+                            "Оригинальная дорожка не подгоняется по длительности.\n"
+                            f"Аудио в PAM: {self.pam_info.duration:.2f} с\n"
+                            f"Новое видео: {self.source_info.duration:.2f} с\n\n"
+                            "Продолжить?",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No,
+                        )
+                        if answer != QMessageBox.Yes:
+                            return
+                elif not self.source_info.has_audio:
                     QMessageBox.warning(
                         self,
-                        "Нет оригинального аудио",
-                        "В исходном PAM нет аудиодорожки — сохранять нечего.",
+                        "В видео нет аудио",
+                        "Выбранный режим требует аудиодорожку в новом видео.\n"
+                        "Выберите «Оригинал» или снимите галочку «Добавить аудио».",
                     )
                     return
-                if (
-                    self.pam_info.duration
-                    and self.source_info.duration
-                    and abs(self.pam_info.duration - self.source_info.duration) > 1.0
-                ):
-                    answer = QMessageBox.question(
-                        self,
-                        "Длительность аудио",
-                        "Оригинальная дорожка не подгоняется по длительности.\n"
-                        f"Аудио в PAM: {self.pam_info.duration:.2f} с\n"
-                        f"Новое видео: {self.source_info.duration:.2f} с\n\n"
-                        "Продолжить?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No,
-                    )
-                    if answer != QMessageBox.Yes:
-                        return
-            elif not self.source_info.has_audio:
-                QMessageBox.warning(
-                    self,
-                    "В видео нет аудио",
-                    "Выбранный режим требует аудиодорожку в новом видео.\n"
-                    "Выберите «Оригинал» или снимите галочку «Добавить аудио».",
-                )
-                return
 
         settings = EncodeSettings(
             video_bitrate=self.bitrate_spin.value(),
@@ -1608,10 +1768,11 @@ class MainWindow(QMainWindow):
         context = JobContext(
             tools=self.tools,
             pam=self.pam_info,
-            source=self.source_info,
+            source=self.source_info if not edit_mode else None,
             output=output,
             settings=settings,
             keep_temp=self.keep_check.isChecked(),
+            mode=self.job_mode,
         )
 
         self._last_output = None
@@ -1620,7 +1781,10 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self._append_log(f"=== Новая задача · PAMF Replacer {__version__} ===")
         self._append_log(f"PAM:    {self.pam_info.path}")
-        self._append_log(f"Видео:  {self.source_info.path}")
+        if edit_mode:
+            self._append_log("Видео:  из PAM (перекодирование текущего потока)")
+        else:
+            self._append_log(f"Видео:  {self.source_info.path}")
         self._append_log(f"Выход:  {output}")
         self._append_log(
             f"Видео: {self.pam_info.resolution_label}, {mode_fps(self.pam_info)}, "
@@ -1692,7 +1856,11 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("PAM создан")
-        box.setText("Новый PAM успешно собран.")
+        box.setText(
+            "PAM пересобран из исходного видео."
+            if self.job_mode == "edit"
+            else "Новый PAM успешно собран."
+        )
         box.setInformativeText(
             f"{result.output.name}\n\n"
             f"Длительность: {result.duration:.2f} c\n"

@@ -54,10 +54,11 @@ class EncodeSettings:
 class JobContext:
     tools: Toolchain
     pam: PamInfo
-    source: MediaInfo
+    source: MediaInfo | None
     output: Path
     settings: EncodeSettings
     keep_temp: bool = False
+    mode: str = "replace"  # "replace" inserts a new video, "edit" re-encodes the PAM video
 
 
 @dataclass
@@ -293,6 +294,11 @@ _ORIGINAL_AUDIO_EXTENSIONS = {
     "ac3": (".ac3",),
 }
 
+_DEMUX_VIDEO_EXTENSIONS = {
+    "mpeg2": (".m2v", ".mpg", ".mpeg"),
+    "avc": (".264", ".h264", ".avc"),
+}
+
 _MUX_AUDIO_NAMES = {
     "lpcm": ("lpcm", ".lpcm"),
     "atrac3plus": ("atrac3plus", ".at3"),
@@ -300,11 +306,7 @@ _MUX_AUDIO_NAMES = {
 }
 
 
-def find_demux_audio(directory: Path, stream) -> Path:
-    """Find the demuxed audio file that belongs to ``stream`` (for example ``.s01_lpcm.lpcm``)."""
-    allowed = _ORIGINAL_AUDIO_EXTENSIONS.get(stream.kind)
-    if not allowed:
-        raise PipelineError(f"Неподдерживаемый кодек оригинального аудио: {stream.codec_label}")
+def _find_demux_stream(directory: Path, stream, allowed: tuple[str, ...], label: str) -> Path:
     pattern = re.compile(rf"\.s{stream.index:02d}_[^.]+\.(?P<ext>[^.]+)$", re.IGNORECASE)
     candidates: list[Path] = []
     for path in directory.iterdir():
@@ -315,10 +317,26 @@ def find_demux_audio(directory: Path, stream) -> Path:
             candidates.append(path)
     if not candidates:
         raise PipelineError(
-            "Не удалось найти извлечённую аудиодорожку "
+            f"Не удалось найти извлечённую {label} "
             f"({stream.codec_label}, поток #{stream.index}) в папке {directory}."
         )
     return candidates[0]
+
+
+def find_demux_audio(directory: Path, stream) -> Path:
+    """Find the demuxed audio file that belongs to ``stream`` (for example ``.s01_lpcm.lpcm``)."""
+    allowed = _ORIGINAL_AUDIO_EXTENSIONS.get(stream.kind)
+    if not allowed:
+        raise PipelineError(f"Неподдерживаемый кодек оригинального аудио: {stream.codec_label}")
+    return _find_demux_stream(directory, stream, allowed, "аудиодорожку")
+
+
+def find_demux_video(directory: Path, stream) -> Path:
+    """Find the demuxed video file that belongs to ``stream`` (for example ``.s00_mpeg-2.m2v``)."""
+    allowed = _DEMUX_VIDEO_EXTENSIONS.get(stream.kind)
+    if not allowed:
+        raise PipelineError(f"Неподдерживаемый видеокодек: {stream.codec_label}")
+    return _find_demux_stream(directory, stream, allowed, "видеодорожку")
 
 
 def _mpeg2_profile(stream) -> tuple[int, int]:
@@ -518,17 +536,32 @@ def run_pipeline(
         raise PipelineError(f"Неподдерживаемый видеокодек: {pam_video.name}")
 
     settings = context.settings
-    audio_mode = settings.audio_mode if settings.audio_enabled else "none"
-    if audio_mode not in ("none", "lpcm", "ac3", "original"):
-        raise PipelineError(f"Неизвестный режим аудио: {audio_mode}")
-    if audio_mode in ("lpcm", "ac3") and not context.source.has_audio:
-        raise PipelineError("В выбранном видео нет аудиодорожки. Выберите LPCM/AC3 только для видео со звуком.")
-    if audio_mode == "original":
-        original_audio = context.pam.audio
-        if not original_audio:
-            raise PipelineError("В оригинальном PAM нет аудиопотока — сохранять нечего.")
-        if original_audio.kind not in _ORIGINAL_AUDIO_EXTENSIONS:
-            raise PipelineError(f"Неподдерживаемый кодек оригинального аудио: {original_audio.codec_label}")
+    mode = context.mode or "replace"
+    if mode not in ("replace", "edit"):
+        raise PipelineError(f"Неизвестный режим работы: {mode}")
+    edit_mode = mode == "edit"
+    source_info = context.source
+    original_audio = context.pam.audio
+
+    if edit_mode:
+        audio_mode = "original" if settings.audio_enabled and original_audio else "none"
+    else:
+        if source_info is None:
+            raise PipelineError("Не выбрано новое видео для замены.")
+        audio_mode = settings.audio_mode if settings.audio_enabled else "none"
+        if audio_mode not in ("none", "lpcm", "ac3", "original"):
+            raise PipelineError(f"Неизвестный режим аудио: {audio_mode}")
+        if audio_mode in ("lpcm", "ac3") and not source_info.has_audio:
+            raise PipelineError(
+                "В выбранном видео нет аудиодорожки. Выберите LPCM/AC3 только для видео со звуком."
+            )
+        if audio_mode == "original":
+            if not original_audio:
+                raise PipelineError("В оригинальном PAM нет аудиопотока — сохранять нечего.")
+            if original_audio.kind not in _ORIGINAL_AUDIO_EXTENSIONS:
+                raise PipelineError(
+                    f"Неподдерживаемый кодек оригинального аудио: {original_audio.codec_label}"
+                )
     audio_enabled = audio_mode != "none"
 
     output = context.output
@@ -538,7 +571,11 @@ def run_pipeline(
     workdir = Path(tempfile.mkdtemp(prefix=".pamf-replace-", dir=str(output.parent)))
     part = output.with_name(output.stem + ".part" + (output.suffix or ".pam"))
 
-    if audio_mode == "original":
+    if edit_mode:
+        video_span = (8.0, 85.0) if audio_enabled else (8.0, 90.0)
+        audio_span = None
+        mux_start = 92.0
+    elif audio_mode == "original":
         video_span = (0.0, 85.0)
         audio_span = None
         mux_start = 92.0
@@ -569,11 +606,25 @@ def run_pipeline(
         elif audio_mode == "original":
             audio_kind = original_audio.kind
 
+        demux_dir: Path | None = None
+        if edit_mode:
+            if cancel and cancel.is_set():
+                raise Cancelled()
+            callbacks.stage("Извлечение потоков PAM…")
+            callbacks.progress(2)
+            demux_dir = Path(tempfile.mkdtemp(prefix="demux-", dir=str(workdir)))
+            run_pamf_demux(tools.pamf, context.pam.path, demux_dir, callbacks, cancel, on_process)
+            video_source = find_demux_video(demux_dir, pam_video)
+            callbacks.log(f"Видео из PAM: {video_source.name}")
+            callbacks.progress(8)
+        else:
+            video_source = source_info.path
+
         callbacks.stage("Кодирование видео…")
-        callbacks.progress(0)
+        callbacks.progress(video_span[0])
         video_command = build_video_command(
             tools.ffmpeg,
-            context.source.path,
+            video_source,
             video_file,
             context.pam,
             context.settings,
@@ -582,7 +633,7 @@ def run_pipeline(
         callbacks.log("> " + subprocess.list2cmdline(video_command))
         run_ffmpeg(
             video_command,
-            context.source.duration,
+            context.pam.duration if edit_mode else source_info.duration,
             callbacks,
             cancel,
             video_span[0],
@@ -593,39 +644,37 @@ def run_pipeline(
         if audio_mode == "original":
             if cancel and cancel.is_set():
                 raise Cancelled()
-            callbacks.stage("Извлечение аудио из PAM…")
-            callbacks.progress(86)
-            demux_dir = Path(tempfile.mkdtemp(prefix="demux-", dir=str(workdir)))
-            try:
+            if demux_dir is None:
+                callbacks.stage("Извлечение аудио из PAM…")
+                callbacks.progress(86)
+                demux_dir = Path(tempfile.mkdtemp(prefix="demux-", dir=str(workdir)))
                 run_pamf_demux(tools.pamf, context.pam.path, demux_dir, callbacks, cancel, on_process)
-                audio_source = find_demux_audio(demux_dir, original_audio)
-                if audio_kind == "lpcm":
-                    audio_file = workdir / f"job.s01_lpcm{audio_source.suffix.lower()}"
-                elif audio_kind == "atrac3plus":
-                    audio_file = workdir / "job.s01_atrac3plus.at3"
-                else:
-                    audio_file = workdir / "job.s01_dolby.ac3"
-                shutil.copy2(audio_source, audio_file)
-                callbacks.log(
-                    f"Оригинальное аудио ({original_audio.codec_label}) сохранено без перекодирования: "
-                    f"{audio_source.name} → {audio_file.name}"
-                )
-            finally:
-                shutil.rmtree(demux_dir, ignore_errors=True)
+            audio_source = find_demux_audio(demux_dir, original_audio)
+            if audio_kind == "lpcm":
+                audio_file = workdir / f"job.s01_lpcm{audio_source.suffix.lower()}"
+            elif audio_kind == "atrac3plus":
+                audio_file = workdir / "job.s01_atrac3plus.at3"
+            else:
+                audio_file = workdir / "job.s01_dolby.ac3"
+            shutil.copy2(audio_source, audio_file)
+            callbacks.log(
+                f"Оригинальное аудио ({original_audio.codec_label}) сохранено без перекодирования: "
+                f"{audio_source.name} → {audio_file.name}"
+            )
         elif audio_enabled and audio_span and audio_file:
             if cancel and cancel.is_set():
                 raise Cancelled()
             callbacks.stage("Кодирование аудио…")
             audio_command = build_audio_command(
                 tools.ffmpeg,
-                context.source.path,
+                source_info.path,
                 audio_file,
                 context.settings,
             )
             callbacks.log("> " + subprocess.list2cmdline(audio_command))
             run_ffmpeg(
                 audio_command,
-                context.source.duration,
+                source_info.duration,
                 callbacks,
                 cancel,
                 audio_span[0],
