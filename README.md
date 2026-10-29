@@ -127,7 +127,7 @@ licenses\
 
 Всё необходимое лежит рядом с exe, установка не требуется: запустите
 `release\PAMF Replacer\PAMF Replacer.exe`. Готовый архив —
-`release\PAMF-Replacer-1.2.0-win64.zip`.
+`release\PAMF-Replacer-1.2.1-win64.zip`.
 
 Для пересборки нужны зависимости из `requirements.txt`, PyInstaller
 (`requirements-build.txt`) и .NET 8 SDK — только чтобы опубликовать self-contained

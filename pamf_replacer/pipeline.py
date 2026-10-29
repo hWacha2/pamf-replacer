@@ -391,6 +391,9 @@ def build_video_command(
     bitrate = f"{settings.video_bitrate:g}M"
     max_rate = f"{settings.max_rate:g}M"
     buffer_size = f"{settings.buffer_size:g}M"
+    # mpeg2video ignores -b:v/-maxrate/-bufsize without -minrate and falls back
+    # to a fixed quantizer (q=2), producing a much smaller file than requested.
+    min_rate = bitrate
 
     if video.kind == "avc":
         profile_name = (video.profile_name or "High").strip().lower()
@@ -448,6 +451,8 @@ def build_video_command(
             "yuv420p",
             "-b:v",
             bitrate,
+            "-minrate",
+            min_rate,
             "-maxrate",
             max_rate,
             "-bufsize",
